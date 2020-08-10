@@ -21,7 +21,7 @@ global FOM
 m = size(FOM.B,2);
 n = size(FOM.A,2);
 p = size(FOM.C,1);
-lam_g = 1e2;
+lam_g = 1e0;
 lam_y = 1e5;
 L = Np + Nf;
 
@@ -32,7 +32,7 @@ Yp = H.Yp;
 Yf = H.Yf;
 
 % Construct performance matrix
-Qbase = 1e2 * ones(p,1);
+Qbase = 1e3 * ones(p,1);
 Qdiag = repmat(Qbase,Nf,1);
 Q = diag(Qdiag);
 
@@ -41,11 +41,22 @@ Q = diag(Qdiag);
 u_UB = .25;
 u_LB = -.25;
 
+% Collect Np measurements prior to controller activation
+x_minus = x0;
+u_minus = zeros(m,1);
+y_minus = [];
+for t = 1-Np:0
+    [x_minus, y_next] = full_dynamics(x_minus,u_minus);
+    y_minus = [y_minus y_next];
+end
+x0 = x_minus(:,end);
+
 % Run
 x = x0;
+yall = [];
 u = [];
-u_in = [];
-y_out = FOM.C*x;
+u_in = zeros(m*Np,1);
+y_out = reshape(y_minus,p*Np,1);
 for t = 1:tf/dt
     % Get reference trajectory for this window
     ref = traj(p*(t-1)+1:p*(t+Nf-1));
@@ -59,12 +70,11 @@ for t = 1:tf/dt
               quad_form(y - ref, Q) +...
               quad_form(ustar, eye(length(ustar))))
     subject to
-        [Up(1:length(u_in),:); Yp(1:length(y_out),:); Uf; Yf] * g ==...
-            [u_in; y_out; ustar; y] +...
+        [Up; Yp; Uf; Yf] * g == [u_in; y_out; ustar; y] +...
             [zeros(size(u_in)); sig; zeros(Nf*(m+p),1)];
-        u_LB <= ustar; ustar <= u_UB;
+        %u_LB <= ustar; ustar <= u_UB;
         %ylim_LB <= y; y <= ylim_UB;
-        sig >= 0;
+        sig == 0;
     cvx_end
     ustar = Uf * g;
     
@@ -79,6 +89,7 @@ for t = 1:tf/dt
     % Progress dynamics
     [x_next, y_next] = full_dynamics(x(:,end),u(:,end));
     x = [x x_next];
+    yall = [yall y_next];
 
     % Update input/output data
     u_in = [u_in(m+1:end); u(:,end)];

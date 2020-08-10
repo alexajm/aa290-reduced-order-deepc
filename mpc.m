@@ -67,7 +67,7 @@ for t = 1:tf/dt
         z(1:n) == mu;
         
         % Boundary conditions
-        ustar_LB <= ustar; ustar <= ustar_UB;
+        %ustar_LB <= ustar; ustar <= ustar_UB;
         %ylim_LB <= y; y <= ylim_UB;
     cvx_end
     

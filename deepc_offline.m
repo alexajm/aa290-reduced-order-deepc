@@ -13,13 +13,13 @@
 %       -datasets: cell of Hankels corresponding to proportions of full
 %           data described by sample_sizes
 %
-function [H_full,H_redux,H_det,datasets] = deepc_offline(file,Np,Nf,sample_sizes)
+function [H_full,H_redux,H_det,datasets] = deepc_offline(file,Np,Nf,est_dims)
 % Globals
 global FOM
 
 % Setup
 if nargin == 3
-    sample_sizes = [];
+    est_dims = [];
 end
 
 % Important values
@@ -46,6 +46,7 @@ y_off = zeros(T_full*p,1);
 x = zeros(n,1);
 w = L;
 past_ranks = -ones(w,1);
+signal = [];
 %figure();
 for t = 1:T_full
     % Apply dynamics
@@ -56,11 +57,13 @@ for t = 1:T_full
     u_off(m*(t-1)+1:m*t) = u_next;
     y_off(p*(t-1)+1:p*t) = y_next;
     x = x_next;
+    signal = [signal; u_next; y_next];
 
     % Get approximate Hankel rank
     if t > L && T_redux < 0
         % Construct Hankel of signal
-        H = hankel(L,t,[u_off(1:t*m); y_off(1:t*p)]);
+        %H = hankel(L,t,[u_off(1:t*m); y_off(1:t*p)]);
+        H = hankel(L,t,signal);
 
         % Parallel analysis
         [lat, lat_hi, ~] = pa_test(H',200);
@@ -71,6 +74,16 @@ for t = 1:T_full
             disp(['determined with ', num2str(t), ' samples (reduced from ', num2str(TFOM), ')']);
             T_redux = t;
             %break
+        end
+    end
+    
+    % Confirm persistent excitation, continue data collection if necessary
+    if t == T_full
+        Hu = hankel(L+n,t,u_off);
+        if rank(Hu) ~= L*m
+            T_full = T_full + 1;
+            u_off = [u_off; zeros(m,1)];
+            y_off = [y_off; zeros(p,1)];
         end
     end
 end
@@ -107,20 +120,21 @@ H_det.Yp = Hy(1:Np*p,:);
 H_det.Yf = Hy(Np*p+1:end,:);
 
 % Process full datasets
-num_samples = length(sample_sizes);
-datasets = cell(num_samples);
-for i = 1:num_samples
-    sze = floor(sample_sizes(i) * T_full);
+num_dims = length(est_dims);
+datasets = cell(num_dims);
+for i = 1:num_dims
+    est_dim = est_dims(i);
+    T_est = (m + 1)*(Np + Nf + est_dim) - 1;
     
     % Get u
-    ui_off = u_off(1:sze*m);
-    Hu = hankel(L,sze,ui_off);
+    ui_off = u_off(1:T_est*m);
+    Hu = hankel(L,T_est,ui_off);
     Hi.Up = Hu(1:Np*m,:);
     Hi.Uf = Hu(Np*m+1:end,:);
     
     % Get y
-    yi_off = y_off(1:sze*p);
-    Hy = hankel(L,sze,yi_off);
+    yi_off = y_off(1:T_est*p);
+    Hy = hankel(L,T_est,yi_off);
     Hi.Yp = Hy(1:Np*p,:);
     Hi.Yf = Hy(Np*p+1:end,:);
     datasets{i} = Hi;

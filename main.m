@@ -1,22 +1,21 @@
-%% DeePC vs MPC vs LQR
-% Compare DeePC, MPC, and LQR control of a given system.
+%% Setup
 
 % controllers = ["deepc", "robust_deepc", "mpc", "koopman", "pgadp", "lqr"];
 % files = ["large_synthetic", "distillation_column", "36-5-10-synthetic"];
 
-% Control, model settings
 global process_cov measure_cov FOM
 file = 'large_synthetic';
-tf = 10;                    % time to simulate until
-dt = .1;                    % length of timestep
+tf = 8;                    % time to simulate until
+dt = .2;                    % length of timestep
 tspan = 0:dt:tf;
 process_cov = 0;            % covariance of process noise
 measure_cov = 0;            % covariance of measurement noise
 
 % Load model
 load(strcat(file, '.mat'));
-n = size(FOM.A,1);
-p = size(FOM.C,1);
+n = size(FOM.A,1);       % state dimensionality
+m = size(FOM.B,2);       % number of inputs
+p = size(FOM.C,1);       % number of outputs
 
 % Trajectory, initial conditions, noise settings
 traj = zeros(n*(tf/dt + 1),1);
@@ -25,12 +24,16 @@ x0 = .5 * ones(n,1);
 process_cov = process_cov * eye(n);
 measure_cov = measure_cov * eye(p);
 
+
+%% DeePC vs MPC vs LQR
+% Compare DeePC, MPC, and LQR control of a given system.
+
 % Run DeePC
 Nf = 10;        % forward time window (future)
-Np = 1;         % backward time window (past)
-[H_full, H_redux, H_det] = deepc_offline(file,Np,Nf);
+Np = n;         % backward time window (past)
+[H_full, ~, ~, ~] = deepc_offline(file,Np,Nf);
 figure(); hold on
-for H = [H_full, H_redux, H_det]
+for H = [H_full]
     % Run
     [x,~] = deepc(x0, traj, tf, dt, H, Np, Nf);
 
@@ -43,15 +46,15 @@ for H = [H_full, H_redux, H_det]
 end
 
 % Run MPC
-[xm,~] = mpc(x0, traj, tf, dt);
-dist = zeros(1,size(xm,2));
-for i = 1:length(dist)
-    dist(i) = norm(xm(:,i) - traj(n*(i-1)+1:n*i));
-end
-plot(tspan,dist);
+% [xm,~] = mpc(x0, traj, tf, dt);
+% dist = zeros(1,size(xm,2));
+% for i = 1:length(dist)
+%     dist(i) = norm(xm(:,i) - traj(n*(i-1)+1:n*i));
+% end
+% plot(tspan,dist);
 
 % Run LQR
-[xl,~] = lqr(x0, traj, tf, dt);
+[xl,~] = lqr(x(:,1), traj, tf, dt);
 dist = zeros(1,size(xl,2));
 for i = 1:length(dist)
     dist(i) = norm(xl(:,i) - traj(n*(i-1)+1:n*i));
@@ -63,139 +66,137 @@ title(['regulation of ',file]);
 xlabel('time');
 ylabel('norm(x - r)');
 ylim([0 max(dist)+1]);
-legend('deepc (full)','deepc (redux)','deepc (det)','mpc','lqr');
+legend('deepc (full)','lqr');
 
 %% Aggregate errors over many DeePC runs with many sample sizes
-% Run DeePC for many datasets and view how error changes with respect to
-% the proportion of data used
+% Run DeePC for many datasets and view how cost changes with respect to
+% how many dimensions the state space is assumed to occupy.
 
 % Settings
-global FOM
-sample_sizes = .4:.1:1;  % proportion of persistently exciting data to use
-num_sizes = length(sample_sizes);
-num_runs = 10;           % number of datasets to evaluate over
+est_dimensions = n-5:n;  % estimated dimensionality of the state space
+num_dims = length(est_dimensions);
+num_runs = 1;           % number of datasets to evaluate over
 Nf = 10;                 % forward time window (future)
-Np = 1;                  % backward time window (past)
-file = 'large_synthetic';
-load(strcat(file, '.mat'));
-n = size(FOM.A,1);       % state dimensionality
-m = size(FOM.B,2);       % number of inputs
-p = size(FOM.C,1);       % number of outputs
-x0 = .5 * ones(n,1);     % initial state
-traj = zeros(n*(tf/dt + 1),1); % reference trajectory
-tf = 8;                  % time to simulate until
-dt = .2;                 % length of timestep
+Np = n;                  % backward time window (past)
+Q = 1e3 * ones(p,1);     % cost matrix
 
-% Calculate errors
-errors = zeros(num_runs,num_sizes);
+% Calculate costs
+costs = zeros(num_runs,num_dims);
 for i = 1:num_runs
-    [~, ~, ~, datasets] = deepc_offline(file,Np,Nf,sample_sizes);
-    for j = 1:num_sizes
-        x = deepc(x0, traj, tf, dt, datasets{j}, Np, Nf);
+    [~, ~, ~, datasets] = deepc_offline(file,Np,Nf,est_dimensions);
+    for j = 1:num_dims
+        [x,~] = deepc(x0, traj, tf, dt, datasets{j}, Np, Nf);
         for k = 1:size(x,2)
-            errors(i,j) = errors(i,j) + norm(x(:,k));
+            y = FOM.C * x(:,k);
+            costs(i,j) = costs(i,j) + y'*Q*y;
         end
     end
 end
-avgs = mean(errors,1);
-devs = std(errors,0,1);
+avgs = mean(costs,1);
+devs = std(costs,0,1);
+
+% Calculate baseline cost (MPC or LQR)
+[x,~] = lqr(x0, traj, tf, dt);
+base = 0;
+for k = 1:size(x,2)
+    y = FOM.C * x(:,k);
+    base = base + y'*Q*y;
+end
 
 % Plot
-figure()
-errorbar(sample_sizes,avgs,devs);
-title('deepc error vs sample size')
-xlabel('proportion of persistently exciting data used')
-ylabel('error')
-xlim([min(sample_sizes) - .2, max(sample_sizes) + .2])
+figure(); hold on
+%errorbar(est_dimensions,avgs,devs);
+plot([0, max(est_dimensions)],[base, base], '--')
+title('deepc cost vs estimated dimension')
+xlabel('estimated dimension')
+ylabel('cost')
+%xlim([min(est_dimensions) - .2, max(est_dimensions) + .2])
 
-%% Compare real dynamics, Hankel dynamics
-% NOTE: not currently compatible with recent updates to code
+%% Simulate known control policy with Hankel dynamics
+% Given an LQR control policy, simulate the system dynamics exclusively
+% using the Hankel of the signal and compare to actual dynamics.
 
-% Construct full order Hankel dynamics
-Np = 1;
-Nf = 10;
-[H_full, H_redux] = deepc_offline(file,Np,Nf);
+% Collect data
+[H_full, ~, H_redux, ~] = deepc_offline(file,Np,Nf);
 Up = H_full.Up;
 Uf = H_full.Uf;
 Yp = H_full.Yp;
 Yf = H_full.Yf;
-yh = FOM.C * x0;
-y = FOM.C * x0; 
-for t = 2:(tf/dt - Nf)
-    % Update Hankel measurement
-    up = [];
-    if t-1 < Np
-        up = reshape(u(:,1:t),numel(u(:,1:t)),1);
-    else
-        up = reshape(u(:,t-Np:t-1),numel(u(:,t-Np:t-1)),1);
-    end
-    uf = reshape(u(:,t:t+Nf-1),numel(u(:,t:t+Nf-1)),1);
-    y0 = [];
-    if t <= Np
-        y0 = reshape(y,numel(y),1);
-    else
-        y0 = reshape(y(:,end-Np+1:end),numel(y(:,end-Np+1:end)),1);
-    end
-    yh_next = hankel_dynamics(Up,Uf,up,uf,Yp,Yf,y0);
-    yh_next = yh_next(1:p);
-    yh = [yh yh_next];
 
-    % Update actual measurement
+% Collect Np measurements prior to controller activation
+x_minus = 2 * ones(n,1);
+u_minus = zeros(m,1);
+y_minus = [];
+for t = -Np:0
+    [x_minus, y_next] = full_dynamics(x_minus,u_minus);
+    y_minus = [y_minus y_next];
+end
+x0 = x_minus(:,end);
+
+% Run LQR
+[x,u] = lqr(x0, traj, tf, dt);
+
+% Construct actual dynamics
+y = y_minus;
+for t = 2:tf/dt
     y_next = FOM.C * x(:,t);
     y = [y y_next];
 end
 
+% Construct full order Hankel dynamics
+yh = y_minus;
+u = [zeros(p,Np) u];
+for t = 1:(tf/dt - Nf)
+    % Collect past data, control policy
+    t0 = t+Np;
+    u0 = reshape(u(:,t:t0-1),numel(u(:,t:t0-1)),1);
+    y0 = reshape(yh(:,end-Np+1:end),numel(yh(:,end-Np+1:end)),1);
+    uf = reshape(u(:,t0:t0+Nf-1),numel(u(:,t0:t0+Nf-1)),1);
+    
+    % Progress dynamics
+    yh_next = hankel_dynamics(Up,Uf,u0,uf,Yp,Yf,y0);
+    if t ~= tf/dt - Nf
+        yh_next = yh_next(1:p);
+    else
+        yh_next = reshape(yh_next,p,Nf);
+    end
+    yh = [yh yh_next];
+end
+
 % Construct reduced order Hankel dynamics
-Up = H_full.Up;
-Uf = H_full.Uf;
-Yp = H_full.Yp;
-Yf = H_full.Yf;
-yh_low = FOM.C * x0;
-for t = 2:(tf/dt - Nf)
-    % Update Hankel measurement
-    up = [];
-    if t-1 < Np
-        up = reshape(u(:,1:t),numel(u(:,1:t)),1);
+Up = H_redux.Up;
+Uf = H_redux.Uf;
+Yp = H_redux.Yp;
+Yf = H_redux.Yf;
+yh_redux = y_minus;
+for t = 1:(tf/dt - Nf)
+    % Collect past data, control policy
+    t0 = t+Np;
+    u0 = reshape(u(:,t:t0-1),numel(u(:,t:t0-1)),1);
+    y0 = reshape(yh_redux(:,end-Np+1:end),numel(yh_redux(:,end-Np+1:end)),1);
+    uf = reshape(u(:,t0:t0+Nf-1),numel(u(:,t0:t0+Nf-1)),1);
+    
+    % Progress dynamics
+    yh_redux_next = hankel_dynamics(Up,Uf,u0,uf,Yp,Yf,y0);
+    if t ~= tf/dt - Nf
+        yh_redux_next = yh_redux_next(1:p);
     else
-        up = reshape(u(:,t-Np:t-1),numel(u(:,t-Np:t-1)),1);
+        yh_redux_next = reshape(yh_redux_next,p,Nf);
     end
-    uf = reshape(u(:,t:t+Nf-1),numel(u(:,t:t+Nf-1)),1);
-    y0 = [];
-    if t <= Np
-        y0 = reshape(y,numel(y),1);
-    else
-        y0 = reshape(y(:,end-Np+1:end),numel(y(:,end-Np+1:end)),1);
-    end
-    yh_low_next = hankel_dynamics(Up,Uf,up,uf,Yp,Yf,y0);
-    yh_low_next = yh_low_next(1:p);
-    yh_low = [yh_low yh_low_next];
+    yh_redux = [yh_redux yh_redux_next];
 end
-figure()
-dist = zeros(1,size(y,2));
-dist_h = zeros(1,size(yh,2));
-dist_low = zeros(1,size(yh_low,2));
-for i = 1:length(dist)
-    ob = FOM.C*traj(n*(i-1)+1:n*i);
-    dist(i) = norm(y(:,i) - ob);
-    dist_h(i) = norm(yh(:,i) - ob);
-    dist_low(i) = norm(yh_low(:,i) - ob);
-end
-full_error = norm(dist_h - dist);
-redux_error = norm(dist_low - dist);
-disp(['full error ',num2str(full_error),', reduced error ',...
-      num2str(redux_error),' over ',num2str(tf/dt),' timesteps']);
 
 % Plot
-T = (0:length(dist)-1)*dt;
-plot(T,dist,T,dist_h,T,dist_low)
-legend('actual','full hankel','redux hankel');
-title(['application of ',control_str,' policy to Hankel for ',file]);
-xlabel('time');
-ylabel('norm(y - r)');
-%ylim([0 max([dist; dist_h])+1]);
-
-
-
+figure(); hold on
+tspan = (1-Np)*dt:dt:tf-dt;
+plot(tspan,y(1:end-1))
+plot(tspan,yh(1:end-1),'--')
+plot(tspan,yh_redux(1:end-1),'-.')
+title('control simulation for state-space and Hankel dynamics')
+xlabel('time')
+ylabel('output')
+legend('actual','hankel','redux')
+xlim([0 tf]);
 
 
 
